@@ -39,5 +39,4 @@ def check_vscode_time():
 
 if __name__ == "__main__":
     check_vscode_time()
-
-    
+    #haha
