@@ -1,0 +1,121 @@
+// Clash Verge - 全局扩展脚本（Script）
+// 目标：VSCode + Python 走 “机场节点(第一跳) -> 美国静态IP(第二跳)”；其它软件仍按原 rules
+
+function main(config) {
+  // ========= ① 只需要改这里：你的美国静态IP =========
+  const staticProxy = {
+    name: "🇺🇸 美国静态IP",
+    type: "socks5",        // 如果商家给的是 http，就改成 "http"
+    server: "1.2.3.4",     // 改成你的IP
+    port: 12345,           // 改成端口
+    username: "user",      // 没有用户名密码就删掉 username/password 两行
+    password: "pass",
+    udp: true
+  };
+
+  // 你文件里的机场选择组名就是这个：🔰 选择节点  :contentReference[oaicite:1]{index=1}
+  const airportGroupName = "🔰 选择节点";
+  // ===============================================
+
+  const finalGroupName = "⛓️ VSCode+Python 静态链";
+  const relayPrefix = "⛓️ chain/";
+
+  const isArr = (x) => Array.isArray(x);
+
+  function upsertByName(arr, obj) {
+    if (!isArr(arr)) arr = [];
+    const i = arr.findIndex((x) => x && x.name === obj.name);
+    if (i >= 0) arr[i] = obj;
+    else arr.push(obj);
+    return arr;
+  }
+
+  function removeGroupsByPredicate(groups, pred) {
+    if (!isArr(groups)) return [];
+    return groups.filter((g) => g && !pred(g));
+  }
+
+  function removeRulesExact(rules, list) {
+    if (!isArr(rules)) return [];
+    const s = new Set(list);
+    return rules.filter((r) => !s.has(r));
+  }
+
+  function cleanName(s) {
+    return String(s || "").replace(/\s+/g, " ").trim();
+  }
+
+  // 0) 初始化
+  if (!config) config = {};
+  if (!isArr(config.proxies)) config.proxies = [];
+  if (!isArr(config["proxy-groups"])) config["proxy-groups"] = [];
+  if (!isArr(config.rules)) config.rules = [];
+
+  // 1) 加入/更新你的美国静态IP到 proxies
+  config.proxies = upsertByName(config.proxies, staticProxy);
+
+  // 2) 找到机场选择组
+  const airportGroup = config["proxy-groups"].find((g) => g && g.name === airportGroupName);
+  if (!airportGroup || !isArr(airportGroup.proxies) || airportGroup.proxies.length === 0) {
+    // 找不到就不改，避免破坏配置
+    return config;
+  }
+
+  // 3) 从机场组里拿“第一跳候选节点”
+  // 你的机场组里有 DIRECT（文件里能看到）:contentReference[oaicite:2]{index=2}
+  // 这里会把 DIRECT/REJECT 排除掉
+  const firstHopNodes = airportGroup.proxies
+    .filter((p) => typeof p === "string" && p.length > 0)
+    .filter((p) => {
+      const x = p.toUpperCase();
+      return x !== "DIRECT" && x !== "REJECT" && x !== "REJECT-DROP";
+    });
+
+  // 4) 为每个第一跳节点生成一个 relay： (该节点 -> 美国静态IP)
+  const relayGroups = [];
+  const relayNames = [];
+
+  for (const hop of firstHopNodes) {
+    const hopName = cleanName(hop);
+    const relayName = cleanName(`${relayPrefix}${hopName}`);
+    relayGroups.push({
+      name: relayName,
+      type: "relay",
+      proxies: [hopName, staticProxy.name]
+    });
+    relayNames.push(relayName);
+  }
+
+  // 5) 最终给 VSCode/Python 用的组：select（选择哪条链=选择第一跳）
+  const finalGroup = {
+    name: finalGroupName,
+    type: "select",
+    proxies: [
+      ...relayNames,
+      airportGroupName,   // 备用：直接走机场（不套静态IP）
+      staticProxy.name    // 备用：直连静态IP（排障用，不建议常用）
+    ]
+  };
+
+  // 6) 清理旧的同名组 & 旧的 relayPrefix 组，避免订阅更新后越叠越多
+  config["proxy-groups"] = removeGroupsByPredicate(
+    config["proxy-groups"],
+    (g) => g.name === finalGroupName || String(g.name || "").startsWith(relayPrefix)
+  );
+
+  // 把新组放前面，UI里好找
+  config["proxy-groups"].unshift(finalGroup, ...relayGroups);
+
+  // 7) 只给 VSCode + Python 插入进程规则（插到 rules 最前面，优先级最高）
+  const myRules = [
+    `PROCESS-NAME,code.exe,${finalGroupName}`,
+    `PROCESS-NAME,Code.exe,${finalGroupName}`,
+    `PROCESS-NAME,python.exe,${finalGroupName}`,
+    `PROCESS-NAME,pythonw.exe,${finalGroupName}`
+  ];
+
+  config.rules = removeRulesExact(config.rules, myRules);
+  config.rules.unshift(...myRules);
+
+  return config;
+}
