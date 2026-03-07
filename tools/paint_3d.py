@@ -25,11 +25,9 @@ seen_legends = set()
 # 正方体的边长大小（0.4 可以让正方体之间留有空隙，如果是 1 则会拼成一个实心大魔方）
 size = 0.7 
 
-# 收集所有正方体数据，后面按视点深度排序（Painter's algorithm）再绘制
-cubes = []
-
-# 2. 遍历每一个数据点，准备正方体数据
+# 2. 遍历每一个数据点，为它们单独“画”一个正方体
 for x_c, y_c, z_c in zip(X, Y, Z):
+    # 模拟危险等级规则
     score = x_c + y_c + z_c
     if score <= 4:
         danger = '低危 (Low)'
@@ -40,80 +38,33 @@ for x_c, y_c, z_c in zip(X, Y, Z):
     else:
         danger = '高危 (High)'
         color = 'red'
-
+        
+    # 计算正方体 8 个顶点的坐标
     d = size / 2
     x_verts = [x_c-d, x_c+d, x_c+d, x_c-d, x_c-d, x_c+d, x_c+d, x_c-d]
     y_verts = [y_c-d, y_c-d, y_c+d, y_c+d, y_c-d, y_c-d, y_c+d, y_c+d]
     z_verts = [z_c-d, z_c-d, z_c-d, z_c-d, z_c+d, z_c+d, z_c+d, z_c+d]
-
+    
+    # 判断该等级是否已经添加过图例
     show_leg = danger not in seen_legends
-    if show_leg:
-        seen_legends.add(danger)
-
+    seen_legends.add(danger)
+    
+    # 自定义鼠标悬停时显示的信息
     hover_text = f"<b>{danger}</b><br>温度: {x_c}<br>形变: {y_c}<br>振动: {z_c}"
-
-    cubes.append({
-        'center': (x_c, y_c, z_c),
-        'x': x_verts,
-        'y': y_verts,
-        'z': z_verts,
-        'color': color,
-        'hover': hover_text,
-        'danger': danger,
-        'showlegend': show_leg
-    })
-
-# 定义视点（可调整），用于按深度排序
-camera_eye = dict(x=1.8, y=1.8, z=1.2)
-
-# 计算深度并排序（点乘视点向量，值小的先绘制）
-def depth_of(cube, eye=camera_eye):
-    x, y, z = cube['center']
-    return x * eye['x'] + y * eye['y'] + z * eye['z']
-
-cubes.sort(key=depth_of)
-
-# 绘制按深度排序后的正方体（从远到近），并为每个 Mesh3d 添加简单光照与平面着色
-for cube in cubes:
+    
+    # 3. 使用 Mesh3d 添加正方体
     fig.add_trace(go.Mesh3d(
-        x=cube['x'],
-        y=cube['y'],
-        z=cube['z'],
-        alphahull=0,
-        color=cube['color'],
-        opacity=cube_opacity,
-        name=cube['danger'],
-        legendgroup=cube['danger'],
-        showlegend=cube['showlegend'],
+        x=x_verts,
+        y=y_verts,
+        z=z_verts,
+        alphahull=0,       # 0 表示自动计算这 8 个点的凸包，从而自动拼成正方体
+        color=color,
+        opacity=cube_opacity,      # 使用可配置的 cube_opacity
+        name=danger,
+        legendgroup=danger, # 将相同危险等级的正方体绑定到同一个图例
+        showlegend=show_leg,
         hoverinfo='text',
-        text=[cube['hover']]*8,
-        flatshading=True,
-        lighting=dict(ambient=0.35, diffuse=0.9, specular=0.2, roughness=0.9),
-        lightposition=dict(x=100, y=200, z=0)
-    ))
-
-    # 绘制边缘线以增强立体感
-    # 将 12 条边用 None 分隔组成一条折线序列
-    edges_x = []
-    edges_y = []
-    edges_z = []
-    v = list(zip(cube['x'], cube['y'], cube['z']))
-    edge_idx = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)]
-    for a,b in edge_idx:
-        xa, ya, za = v[a]
-        xb, yb, zb = v[b]
-        edges_x += [xa, xb, None]
-        edges_y += [ya, yb, None]
-        edges_z += [za, zb, None]
-
-    fig.add_trace(go.Scatter3d(
-        x=edges_x,
-        y=edges_y,
-        z=edges_z,
-        mode='lines',
-        line=dict(color='black', width=1),
-        hoverinfo='none',
-        showlegend=False
+        text=[hover_text]*8 # 为 8 个顶点绑定相同的提示文本
     ))
 
 # 4. 调整坐标轴和整体布局
@@ -126,8 +77,6 @@ fig.update_layout(
         xaxis=dict(tickvals=[1, 2, 3], ticktext=['一', '二', '三'], range=[0.5, 3.5], autorange='reversed'), # 设置范围防止正方体贴边被切掉，且反向显示
         yaxis=dict(tickvals=[1, 2, 3], ticktext=['一', '二', '三'], range=[0.5, 3.5]),
         zaxis=dict(tickvals=[1, 2, 3], ticktext=['一', '二', '三'], range=[0.5, 3.5])
-        ,
-        camera=dict(eye=camera_eye)
     ),
     margin=dict(l=0, r=0, b=0, t=50)
 )
