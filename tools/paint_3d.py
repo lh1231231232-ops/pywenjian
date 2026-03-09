@@ -10,6 +10,12 @@ cube_opacity = 1
 # 将在保存前自动创建该目录（如果不存在）。
 output_dir = r'D:\vscodewenjian\snow_worn_level'
 
+# 是否在每个方块上显示标注（标注内容使用右上角图例信息）
+# 手动设置为 True 来开启方块上显示文字标注
+show_cube_labels = False
+# 标注相对于方块中心在 z 方向上的偏移量（可调）
+label_z_offset = 0.06
+
 # 1. 准备数据：生成 3x3x3 的组合网格
 levels = [1, 2, 3]
 X, Y, Z = np.meshgrid(levels, levels, levels)
@@ -30,16 +36,28 @@ cubes = []
 
 # 2. 遍历每一个数据点，准备正方体数据
 for x_c, y_c, z_c in zip(X, Y, Z):
-    score = x_c + y_c + z_c
-    if score <= 4:
-        danger = '低危 (Low)'
-        color = 'green'
-    elif score <= 7:
-        danger = '中危 (Medium)'
-        color = 'orange'
-    else:
-        danger = '高危 (High)'
+    # 以温升 (ΔT), 形变 (ΔS), 微震 (ΔP) 三个指标为基础，按用户指定规则判定整体预警等级
+    vals = [int(x_c), int(y_c), int(z_c)]
+    count_low = sum(1 for v in vals if v == 1)
+    count_med = sum(1 for v in vals if v == 2)
+    count_high = sum(1 for v in vals if v == 3)
+
+    # 先判断最高级别（Ⅳ级 红色预警）
+    if count_high >= 2 or (count_high == 1 and count_med == 2):
+        danger = 'Ⅳ级 红色 (High)'
         color = 'red'
+    # 其次判断Ⅲ级 橙色预警
+    elif count_med >= 2 or (count_high == 1 and count_med == 1 and count_low == 1):
+        danger = 'Ⅲ级 橙色 (Medium)'
+        color = 'orange'
+    # 再判断Ⅱ级 黄色预警（2或3个指标为低危险）
+    elif count_low >= 2:
+        danger = 'Ⅱ级 黄色 (Low)'
+        color = 'yellow'
+    # 否则视为安全/正常（绿色）
+    else:
+        danger = '正常 (Safe)'
+        color = 'green'
 
     d = size / 2
     x_verts = [x_c-d, x_c+d, x_c+d, x_c-d, x_c-d, x_c+d, x_c+d, x_c-d]
@@ -50,7 +68,12 @@ for x_c, y_c, z_c in zip(X, Y, Z):
     if show_leg:
         seen_legends.add(danger)
 
-    hover_text = f"<b>{danger}</b><br>温度: {x_c}<br>形变: {y_c}<br>振动: {z_c}"
+    # 将数值 1/2/3 映射为 ticktext 中的标签（低/中/高），hover 显示标签而非数字
+    _label_map = {1: '低', 2: '中', 3: '高'}
+    tx = _label_map.get(int(x_c), str(x_c))
+    sy = _label_map.get(int(y_c), str(y_c))
+    pz = _label_map.get(int(z_c), str(z_c))
+    hover_text = f"<b>{danger}</b><br>温升 (ΔT): {tx}<br>形变 (ΔS): {sy}<br>微震 (ΔP): {pz}"
 
     cubes.append({
         'center': (x_c, y_c, z_c),
@@ -129,16 +152,49 @@ for cube in cubes:
         showlegend=False
     ))
 
+    # 可选：在方块上方显示标注（使用图例文本，即 cube['danger']）
+    if show_cube_labels:
+        lx, ly, lz = cube['center']
+        # 将标签放置在方块顶部稍微偏高的位置
+        lz = lz + (size / 2) + label_z_offset
+        fig.add_trace(go.Scatter3d(
+            x=[lx],
+            y=[ly],
+            z=[lz],
+            mode='text',
+            text=[cube['danger']],
+            textfont=dict(size=12, color='black'),
+            hoverinfo='none',
+            showlegend=False
+        ))
+
 # 4. 调整坐标轴和整体布局
 fig.update_layout(
     title='雪崩危险性 3D 预测模型 (正方体版)',
     scene=dict(
-        xaxis_title='温度 (Temperature)',
-        yaxis_title='形变 (Deformation)',
-        zaxis_title='振动 (Vibration)',
-        xaxis=dict(tickvals=[1, 2, 3], ticktext=['一', '二', '三'], range=[0.5, 3.5], autorange='reversed'), # 设置范围防止正方体贴边被切掉，且反向显示
-        yaxis=dict(tickvals=[1, 2, 3], ticktext=['一', '二', '三'], range=[0.5, 3.5]),
-        zaxis=dict(tickvals=[1, 2, 3], ticktext=['一', '二', '三'], range=[0.5, 3.5])
+        # 设置轴标题和刻度的字体大小（title_size / tick_size）
+        xaxis=dict(
+            title=dict(text='温度 (Temperature)', font=dict(size=16)),
+            tickvals=[1, 2, 3],
+            ticktext=['低', '中', '高'],
+            tickfont=dict(size=14),
+            range=[0.5, 3.5],
+            autorange='reversed'
+        ), # 设置范围防止正方体贴边被切掉，且反向显示
+        yaxis=dict(
+            title=dict(text='形变 (Deformation)', font=dict(size=16)),
+            tickvals=[1, 2, 3],
+            ticktext=['低', '中', '高'],
+            tickfont=dict(size=14),
+            range=[0.5, 3.5]
+        ),
+        zaxis=dict(
+            title=dict(text='振动 (Vibration)', font=dict(size=16)),
+            tickvals=[1, 2, 3],
+            ticktext=['低', '中', '高'],
+            tickfont=dict(size=14),
+            range=[0.5, 3.5]
+        )
         ,
         camera=dict(eye=camera_eye)
     ),
