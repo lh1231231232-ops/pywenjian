@@ -4,7 +4,7 @@ import os
 
 # 可配置的正方体透明度（0.0 - 1.0），修改此值以调整所有正方体的透明度
 # 例如：0.0 完全透明，1.0 完全不透明。默认值设为 0.85 保持原来效果。
-cube_opacity = 0.5
+cube_opacity = 1
 
 # 可配置的输出目录，支持相对路径或绝对路径。例如: 'output' 或 'D:/my_outputs'
 # 将在保存前自动创建该目录（如果不存在）。
@@ -23,7 +23,7 @@ fig = go.Figure()
 seen_legends = set()
 
 # 正方体的边长大小（0.4 可以让正方体之间留有空隙，如果是 1 则会拼成一个实心大魔方）
-size = 0.7 
+size = 0.5 
 
 # 收集所有正方体数据，后面按视点深度排序（Painter's algorithm）再绘制
 cubes = []
@@ -68,18 +68,32 @@ camera_eye = dict(x=1.8, y=1.8, z=1.2)
 
 # 计算深度并排序（点乘视点向量，值小的先绘制）
 def depth_of(cube, eye=camera_eye):
-    x, y, z = cube['center']
-    return x * eye['x'] + y * eye['y'] + z * eye['z']
+    # 使用所有顶点计算深度，取最小的点乘值作为该立方体的“最远深度”，
+    # 保证更可靠的从远到近排序（避免中心点排序带来的遮挡问题）。
+    xs = cube['x']
+    ys = cube['y']
+    zs = cube['z']
+    depths = [xx * eye['x'] + yy * eye['y'] + zz * eye['z'] for xx, yy, zz in zip(xs, ys, zs)]
+    return min(depths)
 
 cubes.sort(key=depth_of)
 
 # 绘制按深度排序后的正方体（从远到近），并为每个 Mesh3d 添加简单光照与平面着色
 for cube in cubes:
+    # 使用显式三角面定义（12 个三角，6 个面），确保每个面的透明度一致
+    # 顶点顺序与之前保持一致（0..7）
+# 正确的 12 个三角形面（6 个正方形面，每个面 2 个三角形完美拼接）
+    i = [0, 0, 4, 4, 0, 0, 3, 3, 0, 0, 1, 1]
+    j = [1, 2, 5, 6, 1, 5, 2, 6, 3, 7, 2, 6]
+    k = [2, 3, 6, 7, 5, 4, 6, 7, 7, 4, 6, 5]
+
     fig.add_trace(go.Mesh3d(
         x=cube['x'],
         y=cube['y'],
         z=cube['z'],
-        alphahull=0,
+        i=i,
+        j=j,
+        k=k,
         color=cube['color'],
         opacity=cube_opacity,
         name=cube['danger'],
@@ -87,9 +101,8 @@ for cube in cubes:
         showlegend=cube['showlegend'],
         hoverinfo='text',
         text=[cube['hover']]*8,
-        flatshading=True,
-        lighting=dict(ambient=0.35, diffuse=0.9, specular=0.2, roughness=0.9),
-        lightposition=dict(x=100, y=200, z=0)
+        # 去掉光照/阴影效果，使用默认平面渲染
+        flatshading=False
     ))
 
     # 绘制边缘线以增强立体感
