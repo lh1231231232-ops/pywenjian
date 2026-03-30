@@ -1,0 +1,125 @@
+// Earth Engine 脚本：按月导出矩形区域十年影像（云量<30%）到 Google Drive
+// 使用方法：在 Earth Engine Code Editor 中新建脚本，替换下面的参数后运行（会生成多个 Export 任务）。
+// 可选数据集：Landsat 8 Surface Reflectance（'LANDSAT/LC08/C01/T1_SR'，30m），
+// 或 Sentinel-2 Surface Reflectance（'COPERNICUS/S2_SR'，10m）。
+
+// ====== 用户需修改的参数 ======
+var xmin = 116.0; // 最小经度（示例）
+var ymin = 39.5;  // 最小纬度（示例）
+var xmax = 116.5; // 最大经度（示例）
+var ymax = 40.0;  // 最大纬度（示例）
+
+var startYear = 2015; // 起始年（包含）；Sentinel-2 建议从 2015 年开始
+var endYear = 2022;   // 结束年（包含），共10年请根据需要调整
+var collectionId = 'COPERNICUS/S2_SR'; // 默认改为 Sentinel-2 Surface Reflectance
+var maxCloud = 30; // 云量阈值（百分比）
+var outFolder = 'GEE_Exports'; // Drive 中的目标文件夹
+var scale = 10; // 分辨率（Sentinel-2 推荐 10m）
+
+// ====== 区域定义 ======
+// 可选方式：
+// 方法 A（推荐，交互式）：在 Code Editor 中上传/导入你的 shp（Assets -> New -> Table upload），
+//              然后把导入后的变量（通常名为 `geometry` 或你指定的名字）直接作为区域：
+// var region = geometry; // 若你在脚本顶部看见一个名为 geometry 的变量，则取消注释并使用它
+
+// 方法 B（资产路径）：如果你已将 shp 上传为 Earth Engine 资产，使用资产路径：
+// var shpAsset = 'users/your_username/your_asset_name';
+// var region = ee.FeatureCollection(shpAsset).geometry();
+
+// 方法 C（回退）：保留原矩形参数以便快速测试
+var region = ee.Geometry.Rectangle([xmin, ymin, xmax, ymax]);
+
+// ====== 简单的 Landsat 8 SR 云掩膜函数（若使用 Sentinel-2，请替换相应掩膜函数） ======
+function maskL8sr(image){
+		var qa = image.select('pixel_qa');
+		var cloudBit = 1 << 5;
+		var cloudShadowBit = 1 << 3;
+		var mask = qa.bitwiseAnd(cloudBit).eq(0).and(qa.bitwiseAnd(cloudShadowBit).eq(0));
+		return image.updateMask(mask);
+}
+
+// Sentinel-2 SR 云/薄云掩膜（基于 QA60）
+function maskS2sr(image){
+	var qa = image.select('QA60');
+	var cloudBit = 1 << 10;
+	var cirrusBit = 1 << 11;
+	var mask = qa.bitwiseAnd(cloudBit).eq(0).and(qa.bitwiseAnd(cirrusBit).eq(0));
+	return image.updateMask(mask).copyProperties(image, ['system:time_start']);
+}
+
+// ====== 主循环：按年按月选择最小云量影像并导出到 Drive ======
+var skippedMonths = [];
+var createdTasks = 0;
+
+for (var year = startYear; year <= endYear; year++){
+	for (var m = 1; m <= 12; m++){
+		var start = ee.Date.fromYMD(year, m, 1);
+		var end = start.advance(1, 'month');
+
+		var col = ee.ImageCollection(collectionId)
+								.filterDate(start, end)
+								.filterBounds(region);
+
+		// 根据数据集选择掩膜（在集合上 map 以便导出前可直接使用已掩膜的影像）
+		if (collectionId.indexOf('LC08') !== -1){
+			col = col.map(maskL8sr);
+		} else if (collectionId.indexOf('COPERNICUS/S2') !== -1){
+			col = col.map(maskS2sr);
+		}
+
+		// 选择月内云量最小的影像：
+		// 先确定云量属性名（Landsat 常用 'CLOUD_COVER'，Sentinel-2 常用 'CLOUDY_PIXEL_PERCENTAGE'）
+		var cloudProp = collectionId.indexOf('COPERNICUS/S2') !== -1 ? 'CLOUDY_PIXEL_PERCENTAGE' : 'CLOUD_COVER';
+
+		// 先按阈值过滤，再选阈值内最小云量；若阈值内无影像，则从全部影像中选择最小云量的一幅（作为回退）
+		var filteredByThreshold = col.filter(ee.Filter.lte(cloudProp, maxCloud));
+		var chosenCol = ee.ImageCollection(ee.Algorithms.If(filteredByThreshold.size().gt(0), filteredByThreshold, col));
+		var chosenCount = chosenCol.size().getInfo();
+		if (chosenCount === 0){
+			var ym = year + '-' + (m < 10 ? '0' + m : '' + m);
+			skippedMonths.push(ym);
+			print('跳过无可用影像月份:', ym);
+			continue;
+		}
+		var best = ee.Image(chosenCol.sort(cloudProp).first());
+
+		// 为选出的影像应用数据集对应的掩膜
+		if (collectionId.indexOf('LC08') !== -1){
+			best = maskL8sr(best);
+		}
+		// 如使用 Sentinel-2，请实现并启用 maskS2sr：
+		// if (collectionId.indexOf('COPERNICUS/S2') !== -1){ best = maskS2sr(best); }
+
+		var monthly = best;
+
+		// 输出名称：例如 L8_2013_01
+		var monthStr = m < 10 ? ('0' + m) : ('' + m);
+		var outName = collectionId.split('/')[1] + '_' + year + '_' + monthStr;
+
+		// 发起导出任务（Code Editor 中会出现 Tasks，逐个启动或批量启动）
+		Export.image.toDrive({
+			image: monthly,
+			description: outName,
+			folder: outFolder,
+			fileNamePrefix: outName,
+			region: region,
+			scale: scale,
+			maxPixels: 1e13
+		});
+		createdTasks++;
+	}
+}
+
+print('创建导出任务数量:', createdTasks);
+if (skippedMonths.length > 0){
+	print('无数据月份列表:', skippedMonths);
+} else {
+	print('未发现无数据月份。');
+}
+
+// ====== 使用说明 ======
+// 1) 在 Earth Engine Code Editor 中粘贴并修改上方参数（坐标、年份、数据集、云量阈值、分辨率等）。
+// 2) 运行脚本，会在 Tasks 面板生成多条导出任务：手动或批量点击 Run 开始导出到 Google Drive。
+// 3) 注意 Earth Engine 每次同时运行的导出任务数有限，建议分批运行（例如按年分批）。
+// 4) 若需更严格的云处理或波段选择（如导出 RGB 或其他波段），请在 Export 之前用 .select(...) 和 .resample(...) 处理。
+

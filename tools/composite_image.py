@@ -15,15 +15,19 @@ def combine_images_with_dates(folder_path, output_folder, square_size=512):
     # 确保输出文件夹存在
     os.makedirs(output_folder, exist_ok=True)
     
-    # 匹配文件名模式: [字母]编号#_日期.png
-    pattern = re.compile(r'^([a-zA-Z]*)(\d+)#?_(\d{4}-\d{2}-\d{2})\.png$')
+    # 旧文件名格式: [字母]编号#_YYYY-MM-DD.png
+    old_pattern = re.compile(r'^([a-zA-Z]*)(\d+)#?_(\d{4}-\d{2}-\d{2})\.png$')
+    # 新文件名格式: [字母]编号#_YYYY-MM.png
+    new_pattern = re.compile(r'^([a-zA-Z]*)(\d+)#?_(\d{4}-\d{2})\.png$')
     
     # 按字母前缀和编号分组文件
     file_groups = defaultdict(list)
     
-    # 遍历文件夹中的所有文件
-    for filename in os.listdir(folder_path):
-        match = pattern.match(filename)
+    filenames = os.listdir(folder_path)
+
+    # 先按旧格式匹配
+    for filename in filenames:
+        match = old_pattern.match(filename)
         if match:
             letter_prefix = match.group(1)  # 字母前缀
             number = match.group(2)         # 数字编号
@@ -33,9 +37,23 @@ def combine_images_with_dates(folder_path, output_folder, square_size=512):
             group_key = (letter_prefix, number)
             file_groups[group_key].append((filename, date))
     
-    # 如果没有找到匹配的文件
+    # 旧格式找不到时，自动尝试新格式
     if not file_groups:
-        print("未找到符合命名模式的文件")
+        print("未找到旧格式文件，尝试新格式 YYYY-MM")
+        for filename in filenames:
+            match = new_pattern.match(filename)
+            if match:
+                letter_prefix = match.group(1)  # 字母前缀
+                number = match.group(2)         # 数字编号
+                date = match.group(3)           # 日期(年月)
+
+                # 使用字母前缀和数字编号作为组合键
+                group_key = (letter_prefix, number)
+                file_groups[group_key].append((filename, date))
+
+    # 两种格式都没有找到匹配文件
+    if not file_groups:
+        print("未找到符合命名模式的文件(支持 YYYY-MM-DD 或 YYYY-MM)")
         return
     
     # 处理每个编号组的文件

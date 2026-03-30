@@ -79,11 +79,32 @@ def get_regions_from_shp(shp_path):
     
     return region_data
 
-# 3. 查找TCIjp2文件
+# 3. 查找TCIjp2文件（若未找到则回退查找tif/tiff）
 def find_tci_files(image_dir):
     print("查找TCIjp2文件...")
     safe_folders = glob.glob(os.path.join(image_dir, "*.SAFE"))
     tci_files = []
+
+    def extract_date_from_name(name):
+        # 1) 优先匹配 YYYYMMDD / YYYY_MM_DD / YYYY-MM-DD / YYYY.MM.DD
+        date_match = re.search(r'(?<!\d)(\d{4})[-_.]?(\d{2})[-_.]?(\d{2})(?!\d)', name)
+        if date_match:
+            year, month, day = date_match.groups()
+            return f"{year}-{month}-{day}", "day"
+
+        # 2) 回退匹配按月命名：YYYY_MM / YYYY-MM / YYYY.MM（如 roi_monthly_2016_03_L8L9.tif）
+        month_match = re.search(r'(?<!\d)(\d{4})[-_.](\d{2})(?!\d)', name)
+        if month_match:
+            year, month = month_match.groups()
+            return f"{year}-{month}", "month"
+
+        # 3) 再回退匹配连续6位年月：YYYYMM
+        month_match_compact = re.search(r'(?<!\d)(\d{4})(\d{2})(?!\d)', name)
+        if month_match_compact:
+            year, month = month_match_compact.groups()
+            return f"{year}-{month}", "month"
+
+        return "unknown_date", "unknown"
     
     for folder in safe_folders:
         # 可能的TCI文件路径模式
@@ -102,26 +123,57 @@ def find_tci_files(image_dir):
                 
                 # 从文件夹名称中提取日期
                 folder_name = os.path.basename(folder)
-                date_match = re.search(r'(\d{4})(\d{2})(\d{2})', folder_name)
-                if date_match:
-                    year, month, day = date_match.groups()
-                    date_str = f"{year}-{month}-{day}"
-                else:
+                date_str, date_precision = extract_date_from_name(folder_name)
+                if date_str == "unknown_date":
                     # 尝试从标准Sentinel-2命名格式中提取日期
                     parts = folder_name.split('_')
                     if len(parts) >= 3:
                         date_str = parts[2][:8]  # 例如 '20230101T100101' -> '20230101'
                         date_str = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+                        date_precision = "day"
                     else:
                         date_str = "unknown_date"
+                        date_precision = "unknown"
                 
                 tci_files.append({
                     'path': tci_path,
                     'date': date_str,
+                    'date_precision': date_precision,
                     'folder': folder_name
                 })
                 print(f"找到TCI文件: {tci_path} (日期: {date_str})")
                 break
+
+    # 若未找到TCI jp2文件，则回退搜索tif/tiff
+    if not tci_files:
+        print("未找到TCIjp2文件，开始搜索tif/tiff文件...")
+        tif_patterns = [
+            os.path.join(image_dir, '**', '*.tif'),
+            os.path.join(image_dir, '**', '*.tiff'),
+            os.path.join(image_dir, '**', '*.TIF'),
+            os.path.join(image_dir, '**', '*.TIFF')
+        ]
+
+        tif_candidates = []
+        for pattern in tif_patterns:
+            tif_candidates.extend(glob.glob(pattern, recursive=True))
+
+        for tif_path in sorted(set(tif_candidates)):
+            file_name = os.path.basename(tif_path)
+            parent_name = os.path.basename(os.path.dirname(tif_path))
+
+            # 优先从文件名提取日期，失败后从上级目录名提取
+            date_str, date_precision = extract_date_from_name(file_name)
+            if date_str == "unknown_date":
+                date_str, date_precision = extract_date_from_name(parent_name)
+
+            tci_files.append({
+                'path': tif_path,
+                'date': date_str,
+                'date_precision': date_precision,
+                'folder': parent_name
+            })
+            print(f"找到tif文件: {tif_path} (日期: {date_str})")
     
     return tci_files
 
@@ -132,8 +184,10 @@ def crop_and_save_images(regions, tci_files, output_dir):
     for tci_file in tci_files:
         tci_path = tci_file['path']
         date_str = tci_file['date']
+        date_precision = tci_file.get('date_precision', 'day')
+        date_label = date_str if date_precision == 'month' else date_str
         
-        print(f"\n处理影像: {os.path.basename(tci_path)} (日期: {date_str})")
+        print(f"\n处理影像: {os.path.basename(tci_path)} (日期: {date_label})")
         
         try:
             # 打开TCI文件
@@ -168,6 +222,17 @@ def crop_and_save_images(regions, tci_files, output_dir):
                         if out_image.size == 0:
                             print(f"区域 {region_name} 在影像中无数据，跳过")
                             continue
+
+                        # 统一转为3波段输出，兼容单波段/双波段tif
+                        if out_image.shape[0] >= 3:
+                            out_image = out_image[:3, :, :]
+                        elif out_image.shape[0] == 2:
+                            out_image = np.vstack([out_image, out_image[0:1, :, :]])
+                        elif out_image.shape[0] == 1:
+                            out_image = np.repeat(out_image, 3, axis=0)
+                        else:
+                            print(f"区域 {region_name} 波段数异常，跳过")
+                            continue
                         
                         # 创建输出元数据
                         out_meta = src.meta.copy()
@@ -189,7 +254,7 @@ def crop_and_save_images(regions, tci_files, output_dir):
                         clean_region_name = clean_filename(region_name)
                         
                         # 创建输出文件名
-                        output_filename = f"{clean_region_name}_{date_str}.png"
+                        output_filename = f"{clean_region_name}_{date_label}.png"
                         output_path = os.path.join(output_dir, output_filename)
                         
                         # 保存为PNG
@@ -203,7 +268,7 @@ def crop_and_save_images(regions, tci_files, output_dir):
                         continue
                         
         except Exception as e:
-            print(f"打开或处理TCI文件时出错: {e}")
+            print(f"打开或处理影像文件时出错: {e}")
             continue
 
 # 主函数
@@ -218,10 +283,10 @@ def main():
     if not regions:
         return
     
-    # 查找TCI文件
+    # 查找影像文件（优先TCI jp2，回退tif/tiff）
     tci_files = find_tci_files(image_dir)
     if not tci_files:
-        print("未找到任何TCI文件")
+        print("未找到可裁剪影像（TCI jp2 或 tif/tiff）")
         return
     
     # 裁剪并保存影像

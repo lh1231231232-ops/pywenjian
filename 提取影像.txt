@@ -1,0 +1,200 @@
+/**** 参数区：按需修改 ****/
+var roiAsset = 'projects/my-first-project1-470406/assets/fanwei_shape';   // 填你上传到 GEE 的 SHP 资产路径（FeatureCollection）
+var driveFolder = 'GEE_Exports';             // 导出到 Google Drive 的文件夹
+var filePrefix = 'roi_monthly';              // 导出文件名前缀
+var maxCloud = 30;                           // 最大云量阈值（百分比）
+var allowRadarFallback = false;              // true=光学无数据时允许回退S1伪彩色，false=只要真彩色光学
+var yearsBack = 10;                          // 回溯年数（10 年）
+var useManualYearRange = false;              // true=使用手动年份，false=使用最近 yearsBack 年
+var startYear = 2015;                        // 手动开始年份（包含）
+var endYear = 2025;                          // 手动结束年份（包含）
+
+/**** 读取区域 ****/
+var roiFc = ee.FeatureCollection(roiAsset);
+var roi = roiFc.geometry();
+Map.centerObject(roi, 8);
+Map.addLayer(roi, {color: 'red'}, 'ROI');
+
+/**** 时间范围：最近 10 年，逐月 ****/
+var now = new Date();
+var start;
+var end;
+
+if (useManualYearRange) {
+	start = new Date(startYear, 0, 1);
+	end = new Date(endYear, 11, 1);
+	print('使用手动年份范围: ' + startYear + ' 到 ' + endYear);
+} else {
+	start = new Date(now.getFullYear() - yearsBack, now.getMonth(), 1);
+	end = new Date(now.getFullYear(), now.getMonth(), 1);
+	print('使用最近年份范围: 最近 ' + yearsBack + ' 年');
+}
+
+function pad2(n) {
+	return (n < 10 ? '0' + n : '' + n);
+}
+
+function buildMonthList(startDate, endDate) {
+	var months = [];
+	var d = new Date(startDate.getTime());
+	d.setDate(1);
+	while (d <= endDate) {
+		months.push({y: d.getFullYear(), m: d.getMonth() + 1});
+		d.setMonth(d.getMonth() + 1);
+	}
+	return months;
+}
+
+function getMonthlySources(mStart, mEnd) {
+	var sources = [
+		{
+			sensor: 'S2',
+			scale: 10,
+			cloudProp: 'CLOUDY_PIXEL_PERCENTAGE',
+			collection: ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+				.filterBounds(roi)
+				.filterDate(mStart, mEnd)
+				.filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', maxCloud))
+				.sort('CLOUDY_PIXEL_PERCENTAGE'),
+			toRgb: function(img) {
+				var refl = img.select(['B4', 'B3', 'B2'], ['red', 'green', 'blue']).multiply(0.0001);
+				return refl.visualize({min: 0.02, max: 0.30, gamma: 1.2});
+			}
+		},
+		{
+			sensor: 'L8L9',
+			scale: 30,
+			cloudProp: 'CLOUD_COVER',
+			collection: ee.ImageCollection('LANDSAT/LC09/C02/T1_L2')
+				.merge(ee.ImageCollection('LANDSAT/LC08/C02/T1_L2'))
+				.filterBounds(roi)
+				.filterDate(mStart, mEnd)
+				.filter(ee.Filter.lte('CLOUD_COVER', maxCloud))
+				.sort('CLOUD_COVER'),
+			toRgb: function(img) {
+				var refl = img.select(['SR_B4', 'SR_B3', 'SR_B2'], ['red', 'green', 'blue'])
+					.multiply(0.0000275).add(-0.2);
+				return refl.visualize({min: 0.02, max: 0.30, gamma: 1.2});
+			}
+		},
+		{
+			sensor: 'L7',
+			scale: 30,
+			cloudProp: 'CLOUD_COVER',
+			collection: ee.ImageCollection('LANDSAT/LE07/C02/T1_L2')
+				.filterBounds(roi)
+				.filterDate(mStart, mEnd)
+				.filter(ee.Filter.lte('CLOUD_COVER', maxCloud))
+				.sort('CLOUD_COVER'),
+			toRgb: function(img) {
+				var refl = img.select(['SR_B3', 'SR_B2', 'SR_B1'], ['red', 'green', 'blue'])
+					.multiply(0.0000275).add(-0.2);
+				return refl.visualize({min: 0.02, max: 0.30, gamma: 1.2});
+			}
+		}
+	];
+
+	if (allowRadarFallback) {
+		sources.push({
+			sensor: 'S1',
+			scale: 10,
+			cloudProp: null,
+			collection: ee.ImageCollection('COPERNICUS/S1_GRD')
+				.filterBounds(roi)
+				.filterDate(mStart, mEnd)
+				.filter(ee.Filter.eq('instrumentMode', 'IW'))
+				.filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+				.filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+				.sort('system:time_start'),
+			toRgb: function(img) {
+				var vv = img.select('VV');
+				var vh = img.select('VH');
+				var ratio = vv.subtract(vh).rename('ratio');
+				var pseudo = ee.Image.cat([vv, vh, ratio]);
+				return pseudo.visualize({min: [-20, -25, -5], max: [0, -5, 10]});
+			}
+		});
+	}
+
+	return sources;
+}
+
+function pickBestSource(y, m, callback) {
+	var mStart = ee.Date.fromYMD(y, m, 1);
+	var mEnd = mStart.advance(1, 'month');
+	var sources = getMonthlySources(mStart, mEnd);
+
+	function trySource(index) {
+		if (index >= sources.length) {
+			callback(null);
+			return;
+		}
+
+		var src = sources[index];
+		src.collection.size().evaluate(function(count) {
+			if (!count || count <= 0) {
+				trySource(index + 1);
+				return;
+			}
+
+			var best = ee.Image(src.collection.first());
+			var rgb = src.toRgb(best).clip(roi);
+
+			if (src.cloudProp) {
+				best.get(src.cloudProp).evaluate(function(c) {
+					callback({image: rgb, sensor: src.sensor, scale: src.scale, cloud: c});
+				});
+			} else {
+				callback({image: rgb, sensor: src.sensor, scale: src.scale, cloud: 'N/A'});
+			}
+		}, function(err) {
+			print('检查数据源失败: ' + src.sensor + '，错误: ' + err);
+			trySource(index + 1);
+		});
+	}
+
+	trySource(0);
+}
+
+var monthList = buildMonthList(start, end);
+print('待处理月份: ' + monthList.length + ' 个');
+
+function processMonth(index) {
+	if (index >= monthList.length) {
+		print('脚本执行完成：已批量创建导出任务。请在 Tasks 面板中点击 Run 启动。');
+		return;
+	}
+
+	var ym = monthList[index];
+	var monthLabel = ym.y + '-' + pad2(ym.m);
+
+	pickBestSource(ym.y, ym.m, function(result) {
+		if (!result) {
+			if (allowRadarFallback) {
+				print(monthLabel + ' 无可用影像（S2/L8L9/L7/S1 都无数据），跳过');
+			} else {
+				print(monthLabel + ' 无可用真彩色光学影像（S2/L8L9/L7 都无数据），跳过');
+			}
+			processMonth(index + 1);
+			return;
+		}
+
+		var exportName = filePrefix + '_' + ym.y + '_' + pad2(ym.m) + '_' + result.sensor;
+
+		Export.image.toDrive({
+			image: result.image,
+			description: exportName,
+			folder: driveFolder,
+			fileNamePrefix: exportName,
+			region: roi,
+			scale: result.scale,
+			crs: 'EPSG:4326',
+			maxPixels: 1e13
+		});
+
+		print('已创建任务: ' + exportName + ' | 月份: ' + monthLabel + ' | 传感器: ' + result.sensor + ' | 云量: ' + result.cloud);
+		processMonth(index + 1);
+	});
+}
+
+processMonth(0);

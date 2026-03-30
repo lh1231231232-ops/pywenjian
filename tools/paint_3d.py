@@ -174,7 +174,7 @@ fig.update_layout(
     scene=dict(
         # 设置轴标题和刻度的字体大小（title_size / tick_size）
         xaxis=dict(
-            title=dict(text='温度 (Temperature)', font=dict(size=16)),
+            title=dict(text='温\n度\n(ΔT)', font=dict(size=20)),
             tickvals=[1, 2, 3],
             ticktext=['低', '中', '高'],
             tickfont=dict(size=14),
@@ -182,14 +182,15 @@ fig.update_layout(
             autorange='reversed'
         ), # 设置范围防止正方体贴边被切掉，且反向显示
         yaxis=dict(
-            title=dict(text='形变 (Deformation)', font=dict(size=16)),
+            title=dict(text='形\n变\n(ΔS)', font=dict(size=20)),
             tickvals=[1, 2, 3],
             ticktext=['低', '中', '高'],
             tickfont=dict(size=14),
             range=[0.5, 3.5]
         ),
         zaxis=dict(
-            title=dict(text='振动 (Vibration)', font=dict(size=16)),
+            # 通过在两个字之间插入换行符实现竖排显示
+            title=dict(text='震\n动\n(ΔP)', font=dict(size=20)),
             tickvals=[1, 2, 3],
             ticktext=['低', '中', '高'],
             tickfont=dict(size=14),
