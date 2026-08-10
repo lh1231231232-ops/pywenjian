@@ -13,9 +13,9 @@ from typing import Dict, Iterable, Optional, Set, Tuple
 DEFAULT_DATA_DIR = Path(
 	r"I:\数据\中国气候数据资料日值数据集V3.0(1950-2019)SURF_CLI_CHN_MUL_DAY_V3.0\datasets\TEM"
 )
-DEFAULT_STATION_ID = "55690"
-DEFAULT_OUTPUT_MONTHLY = Path("错那县_55690_逐月温度.csv")
-DEFAULT_OUTPUT_CLIMATOLOGY = Path("错那县_55690_多年各月平均温度.csv")
+DEFAULT_STATION_ID = "56227"
+DEFAULT_OUTPUT_MONTHLY = Path("波密县_56227_逐月温度.csv")
+DEFAULT_OUTPUT_CLIMATOLOGY = Path("波密县_56227_多年各月平均温度.csv")
 DEFAULT_TEMPERATURE_FIELD = "tem_avg"
 # ==================================================================
 

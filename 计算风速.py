@@ -11,40 +11,43 @@ from typing import Dict, Iterable, Optional, Set, Tuple
 
 # ==================== 前置配置区（优先修改这里） ====================
 DEFAULT_DATA_DIR = Path(
-	r"I:\数据\中国气候数据资料日值数据集V3.0(1950-2019)SURF_CLI_CHN_MUL_DAY_V3.0\datasets\PRE"
+	r"I:\数据\中国气候数据资料日值数据集V3.0(1950-2019)SURF_CLI_CHN_MUL_DAY_V3.0\datasets\WIN"
 )
 DEFAULT_STATION_ID = "56227"
-DEFAULT_OUTPUT_MONTHLY = Path("波密县_56227_逐月降水.csv")
-DEFAULT_OUTPUT_CLIMATOLOGY = Path("波密县_56227_多年各月平均.csv")
-DEFAULT_PRECIP_FIELD = "pre_20_20"
+DEFAULT_OUTPUT_MONTHLY = Path("波密县_56227_逐月风速.csv")
+DEFAULT_OUTPUT_CLIMATOLOGY = Path("波密县_56227_多年各月平均风速.csv")
+
+# 风速字段索引（按 split 后的 0 基列号）
+# 常见格式下，前 7 列是台站/经纬度/高程/年月日，后面是气象要素列。
+WIND_FIELD_INDEX = {
+	"avg_wind_speed": 7,
+	"max_wind_speed": 8,
+}
+DEFAULT_WIND_FIELD = "avg_wind_speed"
+
 DEFAULT_START_YEAR: Optional[int] = 1951
-DEFAULT_END_YEAR: Optional[int] = 2017
+DEFAULT_END_YEAR: Optional[int] = 2019
 # ==================================================================
 
 
-FILE_PATTERN = re.compile(r"SURF_CLI_CHN_MUL_DAY-PRE-13011-(\d{4})(\d{2})\.TXT$", re.IGNORECASE)
-PRECIP_FIELD_INDEX = {
-	"pre_20_20": 7,
-	"pre_08_08": 8,
-	"pre_20_08": 9,
-}
+FILE_PATTERN = re.compile(r"SURF_CLI_CHN_MUL_DAY-WIN-11002-(\d{4})(\d{2})\.TXT$", re.IGNORECASE)
 
 
 def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(
-		description="计算地区逐月平均降水量（基于 SURF_CLI_CHN_MUL_DAY-PRE-13011 文件）"
+		description="计算地区逐月平均风速（基于 SURF_CLI_CHN_MUL_DAY-WIN-11002 文件）"
 	)
 	parser.add_argument(
 		"--data-dir",
 		type=Path,
 		default=DEFAULT_DATA_DIR,
-		help="输入目录：PRE 文件所在目录",
+		help="输入目录：WIN 文件所在目录",
 	)
 	parser.add_argument(
-		"--precip-field",
-		choices=tuple(PRECIP_FIELD_INDEX.keys()),
-		default=DEFAULT_PRECIP_FIELD,
-		help="使用哪个降水字段计算（月累计通常建议用 pre_20_20）",
+		"--wind-field",
+		choices=tuple(WIND_FIELD_INDEX.keys()),
+		default=DEFAULT_WIND_FIELD,
+		help="使用哪个风速字段计算（月均通常建议用 avg_wind_speed）",
 	)
 	parser.add_argument(
 		"--station-file",
@@ -56,7 +59,7 @@ def parse_args() -> argparse.Namespace:
 		"--station-id",
 		type=str,
 		default=DEFAULT_STATION_ID,
-		help="可选：单台站编号（如 55690）。设置后仅计算该台站",
+		help="可选：单台站编号（如 56227）。设置后仅计算该台站",
 	)
 	parser.add_argument(
 		"--station-column",
@@ -91,39 +94,35 @@ def parse_args() -> argparse.Namespace:
 	return parser.parse_args()
 
 
-def decode_precip(raw_value: int) -> Optional[float]:
+def decode_wind_speed(raw_value: int) -> Optional[float]:
 	"""
-	将 PRE 编码转换为 mm。
+	将 WIN 编码转换为 m/s。
 
-	规则（依据数据说明）：
+	规则（依据说明文档）：
 	- 32766: 缺测 -> None
-	- 32700: 微量 -> 0.0 mm
-	- 31XXX/30XXX/32XXX: 特殊编码，取 XXX，单位仍按 0.1 mm 处理
-	- 其他正常值: 单位 0.1 mm
+	- +1000: 风速超过仪器上限，在上限值基础上加 1000
+	         这里按保守处理，减去 1000 后再换算（相当于上限值）
+	- 其他正常值: 单位 0.1 m/s
 	"""
 	if raw_value == 32766:
 		return None
-	if raw_value == 32700:
-		return 0.0
-
-	if 30000 <= raw_value <= 32999:
-		prefix = raw_value // 1000
-		if prefix in (30, 31, 32):
-			return (raw_value % 1000) / 10.0
 
 	if raw_value < 0:
 		return None
 
+	if raw_value >= 1000 and raw_value < 32766:
+		raw_value -= 1000
+
 	return raw_value / 10.0
 
 
-def find_pre_files(
+def find_win_files(
 	data_dir: Path,
 	start_year: Optional[int] = None,
 	end_year: Optional[int] = None,
 ) -> Iterable[Tuple[int, int, Path]]:
 	files = []
-	for p in data_dir.glob("SURF_CLI_CHN_MUL_DAY-PRE-13011-*.TXT"):
+	for p in data_dir.glob("SURF_CLI_CHN_MUL_DAY-WIN-11002-*.TXT"):
 		m = FILE_PATTERN.match(p.name)
 		if not m:
 			continue
@@ -240,16 +239,16 @@ def load_region_station_ids(station_file: Optional[Path], station_column: Option
 
 def process_one_file(
 	file_path: Path,
-	precip_idx: int,
+	wind_idx: int,
 	station_filter: Optional[Set[str]],
-) -> Dict[str, float]:
-	"""返回该月每个站点的月累计降水量(mm)。"""
-	station_month_sum: Dict[str, float] = defaultdict(float)
+) -> Dict[str, Tuple[float, int]]:
+	"""返回该月每个站点的（月风速累计, 有效天数）。"""
+	station_sum_count: Dict[str, Tuple[float, int]] = defaultdict(lambda: (0.0, 0))
 
 	with file_path.open("r", encoding="utf-8", errors="ignore") as f:
 		for line in f:
 			parts = line.split()
-			if len(parts) <= precip_idx:
+			if len(parts) <= wind_idx:
 				continue
 
 			station_id = parts[0]
@@ -257,17 +256,18 @@ def process_one_file(
 				continue
 
 			try:
-				raw_value = int(parts[precip_idx])
+				raw_value = int(parts[wind_idx])
 			except ValueError:
 				continue
 
-			precip_mm = decode_precip(raw_value)
-			if precip_mm is None:
+			wind_mps = decode_wind_speed(raw_value)
+			if wind_mps is None:
 				continue
 
-			station_month_sum[station_id] += precip_mm
+			total, count = station_sum_count[station_id]
+			station_sum_count[station_id] = (total + wind_mps, count + 1)
 
-	return station_month_sum
+	return station_sum_count
 
 
 def write_monthly_csv(output_path: Path, records: list[dict]) -> None:
@@ -280,7 +280,7 @@ def write_monthly_csv(output_path: Path, records: list[dict]) -> None:
 				"month",
 				"yyyymm",
 				"station_count",
-				"region_avg_mm",
+				"region_avg_wind_mps",
 				"source_file",
 			],
 		)
@@ -296,7 +296,7 @@ def write_climatology_csv(output_path: Path, records: list[dict]) -> None:
 			fieldnames=[
 				"month",
 				"year_count",
-				"climatology_avg_mm",
+				"climatology_avg_wind_mps",
 			],
 		)
 		writer.writeheader()
@@ -332,12 +332,13 @@ def main() -> None:
 		if not normalized:
 			raise ValueError(f"station-id 非法: {args.station_id}")
 		station_filter = {normalized}
-	precip_idx = PRECIP_FIELD_INDEX[args.precip_field]
+
+	wind_idx = WIND_FIELD_INDEX[args.wind_field]
 
 	monthly_records: list[dict] = []
 	month_to_values: Dict[int, list[float]] = defaultdict(list)
 
-	files = list(find_pre_files(args.data_dir, args.start_year, args.end_year))
+	files = list(find_win_files(args.data_dir, args.start_year, args.end_year))
 	if not files:
 		year_desc = "全部年份"
 		if args.start_year is not None and args.end_year is not None:
@@ -347,7 +348,7 @@ def main() -> None:
 		elif args.end_year is not None:
 			year_desc = f"<={args.end_year}"
 		raise FileNotFoundError(
-			f"在目录 {args.data_dir} 下未找到匹配文件（年份条件: {year_desc}）: SURF_CLI_CHN_MUL_DAY-PRE-13011-YYYYMM.TXT"
+			f"在目录 {args.data_dir} 下未找到匹配文件（年份条件: {year_desc}）: SURF_CLI_CHN_MUL_DAY-WIN-11002-YYYYMM.TXT"
 		)
 
 	total_files = len(files)
@@ -355,13 +356,18 @@ def main() -> None:
 
 	for index, (year, month, path) in enumerate(files, start=1):
 		print_progress(index, total_files, path, start_time)
-		station_month_sum = process_one_file(path, precip_idx, station_filter)
-		station_count = len(station_month_sum)
+		station_sum_count = process_one_file(path, wind_idx, station_filter)
 
+		station_month_means = []
+		for total, count in station_sum_count.values():
+			if count > 0:
+				station_month_means.append(total / count)
+
+		station_count = len(station_month_means)
 		if station_count == 0:
 			region_avg = None
 		else:
-			region_avg = sum(station_month_sum.values()) / station_count
+			region_avg = sum(station_month_means) / station_count
 			month_to_values[month].append(region_avg)
 
 		monthly_records.append(
@@ -370,7 +376,7 @@ def main() -> None:
 				"month": month,
 				"yyyymm": f"{year:04d}{month:02d}",
 				"station_count": station_count,
-				"region_avg_mm": "" if region_avg is None else round(region_avg, 3),
+				"region_avg_wind_mps": "" if region_avg is None else round(region_avg, 3),
 				"source_file": path.name,
 			}
 		)
@@ -386,7 +392,7 @@ def main() -> None:
 				{
 					"month": month,
 					"year_count": len(vals),
-					"climatology_avg_mm": round(climatology_avg, 3),
+					"climatology_avg_wind_mps": round(climatology_avg, 3),
 				}
 			)
 		else:
@@ -394,7 +400,7 @@ def main() -> None:
 				{
 					"month": month,
 					"year_count": 0,
-					"climatology_avg_mm": "",
+					"climatology_avg_wind_mps": "",
 				}
 			)
 
